@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>跨可用区存储卷绑定 / 供给控制器仿真</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #fff; --line: #e5e7eb; --text: #1f2937; --dim: #6b7280;
+    --green: #16a34a; --red: #dc2626; --orange: #d97706; --blue: #2563eb;
+    --purple: #7c3aed; --teal: #0d9488; --gray: #6b7280;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+         background: var(--bg); color: var(--text); font-size: 14px; }
+  header { background: #111827; color: #f9fafb; padding: 14px 24px; display: flex;
+           align-items: center; gap: 16px; flex-wrap: wrap; }
+  header h1 { font-size: 17px; margin: 0; font-weight: 600; }
+  header .spacer { flex: 1; }
+  header input { width: 90px; padding: 5px 8px; border-radius: 6px; border: 1px solid #374151;
+                 background: #1f2937; color: #f9fafb; }
+  header button { padding: 6px 14px; border-radius: 6px; border: 0; background: var(--blue);
+                  color: #fff; cursor: pointer; font-size: 13px; }
+  header button:hover { opacity: .9; }
+  main { padding: 20px 24px; max-width: 1500px; margin: 0 auto; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+          padding: 16px 18px; margin-bottom: 18px; }
+  .card h2 { margin: 0 0 12px; font-size: 15px; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line);
+           white-space: nowrap; }
+  th { color: var(--dim); font-weight: 500; font-size: 12px; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr.better td { background: #f0fdf4; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px;
+           background: #e5e7eb; color: #374151; }
+  .badge.Bound, .badge.Running { background: #dcfce7; color: var(--green); }
+  .badge.Pending { background: #f3f4f6; color: var(--gray); }
+  .badge.Assumed, .badge.VolumesBinding, .badge.Booting { background: #fef3c7; color: var(--orange); }
+  .badge.Resizing { background: #dbeafe; color: var(--blue); }
+  .badge.Failed, .badge.Stuck { background: #fee2e2; color: var(--red); }
+  .badge.Reserved { background: #fef3c7; color: var(--orange); }
+  .badge.Available { background: #f3f4f6; color: var(--gray); }
+  .zero { font-size: 26px; font-weight: 700; color: var(--green); }
+  .nonzero { font-size: 26px; font-weight: 700; color: var(--red); }
+  .tabs { display: flex; gap: 4px; margin-bottom: 14px; flex-wrap: wrap; }
+  .tabs button { padding: 7px 14px; border: 1px solid var(--line); background: #fff;
+                 border-radius: 8px; cursor: pointer; font-size: 13px; color: var(--dim); }
+  .tabs button.active { background: #111827; color: #fff; border-color: #111827; }
+  .toggle { display: inline-flex; border: 1px solid var(--line); border-radius: 8px;
+            overflow: hidden; margin-bottom: 14px; }
+  .toggle button { padding: 6px 16px; border: 0; background: #fff; cursor: pointer; font-size: 13px; }
+  .toggle button.active { background: var(--blue); color: #fff; }
+  .bar { height: 8px; background: #e5e7eb; border-radius: 4px; overflow: hidden; min-width: 90px; }
+  .bar > div { height: 100%; background: var(--blue); }
+  .bar.warn > div { background: var(--orange); }
+  .bar.full > div { background: var(--red); }
+  .zonegrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 14px; }
+  .zonebox { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+  .zonebox h3 { margin: 0 0 8px; font-size: 14px; }
+  .node { display: flex; align-items: center; gap: 8px; padding: 5px 0;
+          border-top: 1px dashed var(--line); font-size: 12.5px; }
+  .node .name { width: 86px; font-family: ui-monospace, monospace; }
+  .node .pool { width: 62px; color: var(--dim); }
+  .node.dead { opacity: .45; text-decoration: line-through; }
+  .logs { max-height: 560px; overflow-y: auto; font-family: ui-monospace, SFMono-Regular, monospace;
+          font-size: 12.5px; }
+  .logline { padding: 3px 6px; border-bottom: 1px solid #f3f4f6; display: flex; gap: 10px; }
+  .logline .t { color: var(--dim); width: 64px; flex: none; text-align: right; }
+  .logline .k { width: 74px; flex: none; font-weight: 600; }
+  .k.schedule { color: var(--blue); } .k.bind { color: var(--green); }
+  .k.provision { color: var(--purple); } .k.orphan { color: var(--red); }
+  .k.resize { color: var(--teal); } .k.node { color: var(--orange); }
+  .hint { color: var(--dim); font-size: 12.5px; }
+  .metric-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+                  gap: 12px; margin-bottom: 14px; }
+  .mcard { border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; background: #fff; }
+  .mcard .v { font-size: 22px; font-weight: 700; }
+  .mcard .l { color: var(--dim); font-size: 12px; margin-top: 2px; }
+  .filterbar { margin-bottom: 10px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .filterbar select, .filterbar input { padding: 5px 8px; border: 1px solid var(--line);
+                 border-radius: 6px; font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>跨可用区存储卷绑定 / 供给控制器仿真</h1>
+  <span class="hint" style="color:#9ca3af">三可用区集群 · 立即绑定 vs 延迟绑定（WaitForFirstConsumer）</span>
+  <div class="spacer"></div>
+  <label style="font-size:13px">种子 <input id="seed" type="number" value="5"></label>
+  <button onclick="rerun()">重新运行实验</button>
+</header>
+<main>
+  <div class="card">
+    <h2>实验对比：全部立即绑定 vs 延迟绑定</h2>
+    <div id="comparison">加载中…</div>
+  </div>
+
+  <div class="toggle">
+    <button id="btnImm" onclick="setScenario('Immediate')">立即绑定场景</button>
+    <button id="btnDel" onclick="setScenario('Delayed')">延迟绑定场景</button>
+  </div>
+
+  <div class="tabs">
+    <button data-tab="pvc" onclick="setTab('pvc')">存储声明</button>
+    <button data-tab="pod" onclick="setTab('pod')">容器</button>
+    <button data-tab="log" onclick="setTab('log')">调度与绑定日志</button>
+    <button data-tab="node" onclick="setTab('node')">节点与配额</button>
+    <button data-tab="orphan" onclick="setTab('orphan')">孤立盘检查</button>
+  </div>
+
+  <div id="content" class="card"></div>
+</main>
+
+<script>
+let EXP = null;
+let scenario = 'Immediate';
+let tab = 'pvc';
+let logKindFilter = '';
+
+async function load() {
+  const r = await fetch('/api/report');
+  EXP = await r.json();
+  document.getElementById('seed').value = EXP.Seed;
+  render();
+}
+async function rerun() {
+  const seed = document.getElementById('seed').value || '42';
+  const r = await fetch('/api/rerun?seed=' + encodeURIComponent(seed), {method: 'POST'});
+  EXP = await r.json();
+  render();
+}
+function setScenario(s) {
+  scenario = s;
+  document.getElementById('btnImm').classList.toggle('active', s === 'Immediate');
+  document.getElementById('btnDel').classList.toggle('active', s === 'Delayed');
+  renderTab();
+}
+function setTab(t) {
+  tab = t;
+  document.querySelectorAll('.tabs button').forEach(b =>
+    b.classList.toggle('active', b.dataset.tab === t));
+  renderTab();
+}
+function sc() { return scenario === 'Immediate' ? EXP.Immediate : EXP.Delayed; }
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function badge(s) { return '<span class="badge ' + esc(s) + '">' + esc(s) + '</span>'; }
+function f1(x) { return (Math.round(x * 10) / 10).toFixed(1); }
+function bar(pct, label) {
+  const cls = pct >= 90 ? 'bar full' : (pct >= 70 ? 'bar warn' : 'bar');
+  return '<div style="display:flex;align-items:center;gap:8px"><div class="' + cls +
+    '" style="flex:1"><div style="width:' + Math.min(100, pct) + '%"></div></div><span>' + label + '</span></div>';
+}
+
+function render() {
+  renderComparison();
+  document.getElementById('btnImm').classList.toggle('active', scenario === 'Immediate');
+  document.getElementById('btnDel').classList.toggle('active', scenario === 'Delayed');
+  document.querySelectorAll('.tabs button').forEach(b =>
+    b.classList.toggle('active', b.dataset.tab === tab));
+  renderTab();
+}
+
+function renderComparison() {
+  const a = EXP.Immediate, b = EXP.Delayed;
+  const pctOf = (x, y) => y ? Math.round(x / y * 100) + '%' : '-';
+  const rows = [
+    ['运行中的容器', a.RunningPods + '/' + a.TotalPods, b.RunningPods + '/' + b.TotalPods, a.RunningPods, b.RunningPods, 'high'],
+    ['因约束卡住的容器数', a.StuckPods, b.StuckPods, a.StuckPods, b.StuckPods, 'low'],
+    ['副本跨可用区反亲和满足率', pctOf(a.AntiSatisfied, a.AntiTotal), pctOf(b.AntiSatisfied, b.AntiTotal),
+      a.AntiTotal ? a.AntiSatisfied / a.AntiTotal : 1, b.AntiTotal ? b.AntiSatisfied / b.AntiTotal : 1, 'high'],
+    ['创建到运行平均时长', f1(a.TTRAvg) + 's', f1(b.TTRAvg) + 's', a.TTRAvg, b.TTRAvg, 'low'],
+    ['创建到运行 P95 时长', f1(a.TTRP95) + 's', f1(b.TTRP95) + 's', a.TTRP95, b.TTRP95, 'low'],
+    ['卷平均绑定时长', f1(a.BindAvg) + 's', f1(b.BindAvg) + 's', a.BindAvg, b.BindAvg, 'low'],
+    ['供给失败次数（含重试）', a.ProvisionFails, b.ProvisionFails, a.ProvisionFails, b.ProvisionFails, 'low'],
+    ['调度假定撤销次数', a.AssumeAborts, b.AssumeAborts, a.AssumeAborts, b.AssumeAborts, 'low'],
+    ['撤销假定后回收的云盘数', a.OrphanReclaims, b.OrphanReclaims, null, null, null],
+    ['孤立盘数量（必须为 0）', a.OrphanDisks, b.OrphanDisks, a.OrphanDisks, b.OrphanDisks, 'low'],
+    ['配额使用均衡度（标准差，越小越好）', a.QuotaBalance.toFixed(3), b.QuotaBalance.toFixed(3),
+      a.QuotaBalance, b.QuotaBalance, 'low'],
+  ];
+  let html = '<table><tr><th>指标</th><th class="num">全部立即绑定</th><th class="num">延迟绑定</th></tr>';
+  for (const [label, va, vb, na, nb, dir] of rows) {
+    let clsA = '', clsB = '';
+    if (dir && na !== nb) {
+      const aBetter = dir === 'low' ? na < nb : na > nb;
+      clsA = aBetter ? ' style="color:var(--green);font-weight:600"' : ' style="color:var(--red)"';
+      clsB = aBetter ? ' style="color:var(--red)"' : ' style="color:var(--green);font-weight:600"';
+    }
+    html += '<tr><td>' + esc(label) + '</td><td class="num"' + clsA + '>' + esc(va) +
+            '</td><td class="num"' + clsB + '>' + esc(vb) + '</td></tr>';
+  }
+  html += '</table>';
+  const reasonSet = new Set([...Object.keys(a.StuckReasons), ...Object.keys(b.StuckReasons)]);
+  if (reasonSet.size) {
+    html += '<h2 style="margin-top:16px">卡住原因细分</h2><table><tr><th>原因</th><th class="num">立即绑定</th><th class="num">延迟绑定</th></tr>';
+    for (const r of [...reasonSet].sort()) {
+      html += '<tr><td>' + esc(r) + '</td><td class="num">' + (a.StuckReasons[r] || 0) +
+              '</td><td class="num">' + (b.StuckReasons[r] || 0) + '</td></tr>';
+    }
+    html += '</table>';
+  }
+  html += '<h2 style="margin-top:16px">各可用区云盘配额使用</h2><div class="zonegrid">';
+  for (const [r, name] of [[a, '立即绑定'], [b, '延迟绑定']]) {
+    html += '<div class="zonebox"><h3>' + name + '</h3>';
+    for (const z of r.Zones) {
+      html += '<div style="margin:6px 0"><span style="font-family:monospace">' + esc(z.Name) + '</span>' +
+              bar(z.Pct, z.Used + '/' + z.Quota + 'Gi (' + f1(z.Pct) + '%)') + '</div>';
+    }
+    html += '</div>';
+  }
+  html += '</div>';
+  document.getElementById('comparison').innerHTML = html;
+}
+
+function renderTab() {
+  if (!EXP) return;
+  const r = sc();
+  if (tab === 'pvc') renderPVCs(r);
+  else if (tab === 'pod') renderPods(r);
+  else if (tab === 'log') renderLogs(r);
+  else if (tab === 'node') renderNodes(r);
+  else if (tab === 'orphan') renderOrphans(r);
+}
+
+function renderPVCs(r) {
+  let html = '<h2>存储声明（' + r.PVCs.length + ' 个）—— 绑定状态与所在可用区</h2>';
+  html += '<table><tr><th>名称</th><th>存储类</th><th>绑定模式</th><th>状态</th><th>可用区</th>' +
+          '<th class="num">容量</th><th>绑定卷</th><th>所属 Pod</th><th class="num">绑定耗时</th><th>备注</th></tr>';
+  for (const p of r.PVCs) {
+    const phase = p.Failed ? 'Failed' : p.Phase;
+    html += '<tr><td style="font-family:monospace">' + esc(p.Name) + '</td><td>' + esc(p.SC) +
+      '</td><td>' + esc(p.Mode) + '</td><td>' + badge(phase) + '</td><td>' + esc(p.Zone || '—') +
+      '</td><td class="num">' + p.ReqGi + 'Gi</td><td style="font-family:monospace">' + esc(p.Volume || '—') +
+      '</td><td style="font-family:monospace">' + esc(p.Pod) + '</td><td class="num">' +
+      (p.BoundWait >= 0 ? f1(p.BoundWait) + 's' : '—') + '</td><td class="hint">' + esc(p.Reason || '') + '</td></tr>';
+  }
+  html += '</table>';
+  document.getElementById('content').innerHTML = html;
+}
+
+function renderPods(r) {
+  let html = '<h2>容器（' + r.TotalPods + ' 个）：运行 ' + r.RunningPods + '，卡住 ' + r.StuckPods + '</h2>';
+  html += '<table><tr><th>名称</th><th>服务</th><th>状态</th><th>节点</th><th>可用区</th>' +
+          '<th class="num">CPU</th><th class="num">内存</th><th>卷</th><th class="num">重调度</th>' +
+          '<th class="num">启动时长</th><th>卡住原因</th></tr>';
+  for (const p of r.Pods) {
+    const phase = p.Phase === 'Running' ? 'Running' : 'Stuck';
+    html += '<tr><td style="font-family:monospace">' + esc(p.Name) + '</td><td>' + esc(p.Service) +
+      '</td><td>' + badge(phase) + '</td><td style="font-family:monospace">' + esc(p.Node || '—') +
+      '</td><td>' + esc(p.Zone || '—') + '</td><td class="num">' + p.CPU + '</td><td class="num">' +
+      p.Mem + 'Gi</td><td style="font-family:monospace">' + esc(p.PVCs.join(', ')) + '</td><td class="num">' +
+      p.Reschedules + '</td><td class="num">' + (p.TTR >= 0 ? f1(p.TTR) + 's' : '—') +
+      '</td><td class="hint">' + esc(p.Reason || '') + '</td></tr>';
+  }
+  html += '</table>';
+  document.getElementById('content').innerHTML = html;
+}
+
+function renderLogs(r) {
+  const kinds = ['', 'schedule', 'bind', 'provision', 'orphan', 'resize', 'node'];
+  let html = '<h2>调度决策与卷绑定日志（含卷拓扑约束）</h2><div class="filterbar">' +
+    '<span class="hint">类型过滤：</span><select onchange="logKindFilter=this.value;renderTab()">';
+  for (const k of kinds) {
+    html += '<option value="' + k + '"' + (logKindFilter === k ? ' selected' : '') + '>' +
+            (k === '' ? '全部' : k) + '</option>';
+  }
+  html += '</select><span class="hint">共 ' + r.Events.length + ' 条（仿真时长 ' + f1(r.SimDuration) + 's）</span></div>';
+  html += '<div class="logs">';
+  const evs = r.Events.filter(e => !logKindFilter || e.Kind === logKindFilter);
+  for (const e of evs) {
+    html += '<div class="logline"><span class="t">' + f1(e.Time) + 's</span>' +
+            '<span class="k ' + esc(e.Kind) + '">' + esc(e.Kind) + '</span><span>' + esc(e.Msg) + '</span></div>';
+  }
+  html += '</div>';
+  document.getElementById('content').innerHTML = html;
+}
+
+function renderNodes(r) {
+  let html = '<h2>节点与各可用区云盘配额</h2><div class="zonegrid">';
+  for (const z of r.Zones) {
+    html += '<div class="zonebox"><h3>' + esc(z.Name) + '</h3>';
+    html += '<div style="margin-bottom:8px"><span class="hint">云盘配额</span>' +
+            bar(z.Pct, z.Used + '/' + z.Quota + 'Gi') + '</div>';
+    for (const n of r.Nodes.filter(n => n.Zone === z.Name)) {
+      const cpuPct = n.CPUCap ? n.CPUUsed / n.CPUCap * 100 : 0;
+      const memPct = n.MemCap ? n.MemUsed / n.MemCap * 100 : 0;
+      html += '<div class="node' + (n.Dead ? ' dead' : '') + '"><span class="name">' + esc(n.Name) +
+        '</span><span class="pool">' + esc(n.Pool) + (n.Dead ? ' ✕' : '') + '</span>' +
+        '<span style="flex:1">' + bar(cpuPct, 'CPU ' + n.CPUUsed + '/' + n.CPUCap) + '</span>' +
+        '<span style="flex:1">' + bar(memPct, 'Mem ' + n.MemUsed + '/' + n.MemCap + 'Gi') + '</span></div>';
+    }
+    html += '</div>';
+  }
+  html += '</div>';
+  document.getElementById('content').innerHTML = html;
+}
+
+function renderOrphans(r) {
+  const ok = r.OrphanDisks === 0;
+  let html = '<h2>孤立盘检查</h2>';
+  html += '<div class="metric-cards">' +
+    '<div class="mcard"><div class="' + (ok ? 'zero' : 'nonzero') + '">' + r.OrphanDisks + '</div>' +
+    '<div class="l">孤立盘数量（云盘 ↔ 持久卷双向引用校验）</div></div>' +
+    '<div class="mcard"><div class="v">' + r.OrphanReclaims + '</div>' +
+    '<div class="l">假定撤销后回收的云盘数（供给在途时假定被撤销，盘完成即回收）</div></div>' +
+    '<div class="mcard"><div class="v">' + r.AssumeAborts + '</div>' +
+    '<div class="l">调度假定撤销次数（供给失败 / 配额不足 / 假定超时 / 节点删除）</div></div>' +
+    '<div class="mcard"><div class="v">' + r.ProvisionFails + '</div>' +
+    '<div class="l">供给失败次数（含重试）</div></div></div>';
+  if (ok) {
+    html += '<p style="color:var(--green)">✓ 校验通过：每块云盘都有对应的持久卷，每个持久卷都对应真实云盘，没有孤立盘。</p>';
+  } else {
+    html += '<p style="color:var(--red)">✗ 发现孤立盘：</p><ul>';
+    for (const o of r.OrphanList) html += '<li>' + esc(o) + '</li>';
+    html += '</ul>';
+  }
+  const reclaimLogs = r.Events.filter(e => e.Kind === 'orphan');
+  if (reclaimLogs.length) {
+    html += '<h2 style="margin-top:14px">回收与检查记录</h2><div class="logs">';
+    for (const e of reclaimLogs) {
+      html += '<div class="logline"><span class="t">' + f1(e.Time) + 's</span>' +
+              '<span class="k orphan">orphan</span><span>' + esc(e.Msg) + '</span></div>';
+    }
+    html += '</div>';
+  }
+  document.getElementById('content').innerHTML = html;
+}
+
+setScenario('Immediate');
+load();
+setInterval(load, 5000);
+</script>
+</body>
+</html>
